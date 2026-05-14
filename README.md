@@ -23,8 +23,12 @@ npm install
 npm run build
 ```
 
-### 3. Configure Claude Desktop
-Add the following to your Claude Desktop configuration file:
+### 3. Configure your MCP client
+
+#### Claude Desktop
+
+Add to your Claude Desktop configuration file (`%APPDATA%\Claude\claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -37,6 +41,40 @@ Add the following to your Claude Desktop configuration file:
   }
 }
 ```
+
+#### Claude Code (native Windows)
+
+Add to `%USERPROFILE%\.claude\settings.json` (or run `claude mcp add`):
+
+```json
+{
+  "mcpServers": {
+    "outlook": {
+      "command": "node",
+      "args": ["C:\\Users\\<your-username>\\windows-outlook-mcp\\dist\\index.js"]
+    }
+  }
+}
+```
+
+#### Claude Code from WSL (Windows Subsystem for Linux)
+
+Claude Code runs inside WSL but the MCP server must run on Windows (it needs the Outlook COM interface). Bridge them by pointing the WSL Claude config at the Windows Node binary and the Windows dist path.
+
+Add to `~/.claude/settings.json` inside WSL:
+
+```json
+{
+  "mcpServers": {
+    "outlook": {
+      "command": "/mnt/c/Program Files/nodejs/node.exe",
+      "args": ["C:\\Users\\<your-username>\\windows-outlook-mcp\\dist\\index.js"]
+    }
+  }
+}
+```
+
+> **Note:** Use the Windows `node.exe` via `/mnt/c/...` — do **not** use the WSL Node binary. The server spawns PowerShell COM calls that only work from a Windows process.
 
 ## Usage Examples
 
@@ -51,42 +89,6 @@ Find free 30-minute slots in my calendar for next week between 9 AM and 5 PM.
 ```
 
 
-
-## Using from WSL (Windows Subsystem for Linux)
-
-The MCP server runs on Windows (requires the Outlook COM interface), but Claude Code
-runs inside WSL. Bridge them by pointing the WSL Claude config at the Windows Node
-binary and the Windows dist path.
-
-### Claude Code config (`~/.claude.json` or `~/.claude/settings.json`)
-
-```json
-{
-  "mcpServers": {
-    "outlook": {
-      "command": "/mnt/c/Program Files/nodejs/node.exe",
-      "args": ["C:\\Users\\<your-username>\\windows-outlook-mcp\\dist\\index.js"]
-    }
-  }
-}
-```
-
-> **Note:** Use the Windows `node.exe` via `/mnt/c/...` — do **not** use the WSL
-> Node binary. The server spawns PowerShell COM calls that only work from a Windows
-> process. The WSL path `/mnt/c/...` is transparent to Windows Node.
-
-### Build from WSL
-
-You can edit source in WSL and build via the Windows npm:
-
-```bash
-cd /mnt/c/Users/<your-username>/windows-outlook-mcp
-/mnt/c/Program Files/nodejs/npm.cmd run build
-```
-
-Or open a PowerShell terminal on the Windows side and run `npm run build` there.
-
----
 
 ## Development Notes
 
@@ -105,6 +107,17 @@ outlook/
 ```
 
 To extend functionality, modify the relevant TypeScript files and recompile.
+
+### Building from WSL
+
+You can edit source files in WSL and build using the Windows npm:
+
+```bash
+cd /mnt/c/Users/<your-username>/windows-outlook-mcp
+"/mnt/c/Program Files/nodejs/npm.cmd" run build
+```
+
+Or open a PowerShell terminal on the Windows side and run `npm run build` there.
 
 ## Available Tools & Features
 
