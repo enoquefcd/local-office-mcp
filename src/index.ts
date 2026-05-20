@@ -7,6 +7,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { OutlookManager, EmailMessage, EmailDraft } from './outlook-manager.js';
+import { TeamsManager } from './teams-manager.js';
 
 const server = new Server(
   {
@@ -21,6 +22,7 @@ const server = new Server(
 );
 
 const outlookManager = new OutlookManager();
+const teamsManager = new TeamsManager();
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -457,6 +459,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           type: "object",
           properties: {}
         }
+      },
+      {
+        name: "teams_get_chats",
+        description: "List recent Teams chats and group conversations (read-only, Teams must be closed)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            count: { type: "number", description: "Number of chats to return (default 20)", default: 20 }
+          }
+        }
+      },
+      {
+        name: "teams_get_messages",
+        description: "Get messages from a specific Teams chat by chat ID",
+        inputSchema: {
+          type: "object",
+          properties: {
+            chat_id: { type: "string", description: "Chat/conversation ID (from teams_get_chats)" },
+            count:   { type: "number", description: "Number of messages to return (default 50)", default: 50 }
+          },
+          required: ["chat_id"]
+        }
+      },
+      {
+        name: "teams_search_messages",
+        description: "Search Teams messages by keyword across all chats",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search keyword or phrase" },
+            count: { type: "number", description: "Max results (default 20)", default: 20 }
+          },
+          required: ["query"]
+        }
+      },
+      {
+        name: "teams_get_channels",
+        description: "List Teams channels and teams the user is part of",
+        inputSchema: {
+          type: "object",
+          properties: {
+            count: { type: "number", description: "Number of channels to return (default 50)", default: 50 }
+          }
+        }
+      },
+      {
+        name: "teams_list_stores",
+        description: "Debug: list all IndexedDB object store names found in the Teams cache",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
       }
     ]
   };
@@ -835,6 +889,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    ).join('\n')
             },
           ],
+        };
+      }
+
+      case 'teams_get_chats': {
+        const count = (args as any)?.count || 20;
+        const chats = await teamsManager.getChats(count);
+        return {
+          content: [{
+            type: 'text',
+            text: `💬 **Teams Chats** (${chats.length})\n\n` +
+              chats.map((c, i) =>
+                `${i + 1}. **${c.displayName || '(unnamed)'}** [${c.chatType || 'chat'}]\n` +
+                `   ID: ${c.id}\n` +
+                (c.members.length ? `   Members: ${c.members.join(', ')}\n` : '')
+              ).join('\n')
+          }]
+        };
+      }
+
+      case 'teams_get_messages': {
+        const chatId = (args as any)?.chat_id;
+        const count = (args as any)?.count || 50;
+        if (!chatId) throw new Error('chat_id is required');
+        const messages = await teamsManager.getMessages(chatId, count);
+        return {
+          content: [{
+            type: 'text',
+            text: `📨 **Messages in chat** (${messages.length})\n\n` +
+              messages.map((m, i) =>
+                `${i + 1}. **${m.from}** — ${m.time}\n   ${m.content.substring(0, 300)}${m.content.length > 300 ? '...' : ''}\n`
+              ).join('\n')
+          }]
+        };
+      }
+
+      case 'teams_search_messages': {
+        const query = (args as any)?.query;
+        const count = (args as any)?.count || 20;
+        if (!query) throw new Error('query is required');
+        const results = await teamsManager.searchMessages(query, count);
+        return {
+          content: [{
+            type: 'text',
+            text: `🔍 **Teams search: "${query}"** (${results.length} results)\n\n` +
+              results.map((m, i) =>
+                `${i + 1}. **${m.from}** — ${m.time}\n   Chat: ${m.chat_id}\n   ${m.content.substring(0, 300)}${m.content.length > 300 ? '...' : ''}\n`
+              ).join('\n')
+          }]
+        };
+      }
+
+      case 'teams_get_channels': {
+        const count = (args as any)?.count || 50;
+        const channels = await teamsManager.getChannels(count);
+        return {
+          content: [{
+            type: 'text',
+            text: `📢 **Teams Channels** (${channels.length})\n\n` +
+              channels.map((c, i) =>
+                `${i + 1}. **${c.channelName}** — ${c.teamName}\n   ID: ${c.id}\n`
+              ).join('\n')
+          }]
+        };
+      }
+
+      case 'teams_list_stores': {
+        const stores = await teamsManager.listStores();
+        return {
+          content: [{
+            type: 'text',
+            text: `🗄️ **Teams IDB object stores** (${stores.length})\n\n` +
+              stores.map((s, i) => `${i + 1}. ${s}`).join('\n')
+          }]
         };
       }
 
