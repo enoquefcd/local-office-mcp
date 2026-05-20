@@ -9,7 +9,10 @@
 
 **Give your AI assistant native access to Outlook and Teams — entirely on your machine.**
 
-**No Microsoft Graph API. No OAuth. No cloud relay.** Just your local Outlook COM interface and the Teams cache on disk.
+**No Microsoft Graph API.**<br>
+**No OAuth.**<br>
+**No cloud relay.**<br>
+Just your local Outlook COM interface and the Teams cache on disk.
 
 ```
 "Summarize my inbox and flag anything that needs a reply today."
