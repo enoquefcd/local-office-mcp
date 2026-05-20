@@ -11,8 +11,8 @@ import { TeamsManager } from './teams-manager.js';
 
 const server = new Server(
   {
-    name: 'outlook-mcp-server',
-    version: '1.0.0',
+    name: 'local-office-mcp',
+    version: '1.1.0',
   },
   {
     capabilities: {

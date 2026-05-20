@@ -1,23 +1,129 @@
-# Windows Office MCP Server
+# local-office-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-16%2B-green.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4.svg)](https://www.microsoft.com/windows)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4.svg)](#requirements)
+[![Last Commit](https://img.shields.io/github/last-commit/enoquefcd/local-office-mcp.svg)](https://github.com/enoquefcd/local-office-mcp/commits/main)
 
-A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that gives AI assistants native access to **Microsoft Outlook** (email + calendar) and **Microsoft Teams** — entirely on your machine, no cloud APIs, no OAuth, no data leaving your device.
+**Give your AI assistant native access to Outlook and Teams — entirely on your machine.**
 
-- **Outlook** is accessed via COM automation (PowerShell) — same interface VBA macros use
-- **Teams** is accessed by reading the local IndexedDB cache — works while Teams is running
+No Microsoft Graph API. No OAuth. No cloud relay. Just your local Outlook COM interface and the Teams cache on disk.
 
-> **Privacy-first:** all processing is local. Nothing is sent to external servers beyond your normal AI assistant traffic.
+```
+"Summarize my inbox and flag anything that needs a reply today."
+"Find a free 1-hour slot next week for a meeting with 3 people."
+"Show me what the team was saying about the deployment last Thursday."
+"Search my Teams messages for the database migration plan."
+```
 
 ---
 
-## Features
+## How it works
 
-### 📧 Outlook — Email
+```
+┌─────────────────────────────────────────────────┐
+│                  AI Assistant                   │
+│              (Claude, Cursor, etc.)             │
+└──────────────────┬──────────────────────────────┘
+                   │ MCP (stdio)
+┌──────────────────▼──────────────────────────────┐
+│              local-office-mcp                   │
+│               Node.js / TypeScript              │
+├────────────────────┬────────────────────────────┤
+│   Outlook tools    │      Teams tools            │
+│                    │                             │
+│  PowerShell COM    │  Python script              │
+│  Outlook.Application  ccl_chromium_reader       │
+│  (live, via IPC)   │  (local IndexedDB cache)    │
+└────────────────────┴────────────────────────────┘
+         │                        │
+  ┌──────▼──────┐         ┌───────▼──────┐
+  │   Outlook   │         │    Teams     │
+  │  desktop    │         │  IndexedDB   │
+  │    app      │         │   on disk    │
+  └─────────────┘         └──────────────┘
+```
+
+- **Outlook** — spawns PowerShell to talk to `Outlook.Application` via COM. Same interface VBA macros use; no credentials needed.
+- **Teams** — copies the local LevelDB cache to a temp folder (bypassing the file lock) and reads it with [`ccl_chromium_reader`](https://github.com/cclgroupltd/ccl_chrome_indexeddb). Teams stays open; data is never written back.
+
+---
+
+## Quick start
+
+```powershell
+# 1. clone & build
+git clone https://github.com/enoquefcd/local-office-mcp.git
+cd local-office-mcp
+npm install && npm run build
+
+# 2. Teams support (optional)
+pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git
+
+# 3. wire up Claude Code (Windows)
+claude mcp add local-office node -- "C:\path\to\local-office-mcp\dist\index.js"
+```
+
+<details>
+<summary>Claude Desktop config</summary>
+
+Edit `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "local-office": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:\\path\\to\\local-office-mcp\\dist\\index.js"]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary>Claude Code from WSL</summary>
+
+The server must run as a Windows process (Outlook COM only works on Windows). Point WSL's Claude config at the Windows `node.exe`:
+
+```json
+{
+  "mcpServers": {
+    "local-office": {
+      "command": "/mnt/c/Program Files/nodejs/node.exe",
+      "args": ["/mnt/c/path/to/local-office-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+> Use the Windows `node.exe` — not the WSL Node binary.
+</details>
+
+---
+
+## Requirements
+
+| Requirement | Outlook tools | Teams tools |
+|------------|:---:|:---:|
+| Windows 10/11 | ✅ | ✅ |
+| Microsoft Outlook (desktop) | ✅ | — |
+| Node.js 16+ | ✅ | ✅ |
+| PowerShell 5+ | ✅ | — |
+| Microsoft Teams (installed + opened at least once) | — | ✅ |
+| Python 3.9+ | — | ✅ |
+| `ccl_chromium_reader` | — | ✅ |
+
+---
+
+## Tools
+
+<details>
+<summary><strong>📧 Email</strong> — 12 tools</summary>
+
 | Tool | Description |
 |------|-------------|
 | `get_inbox_emails` | Retrieve inbox emails |
@@ -29,11 +135,15 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 | `search_draft_emails` | Search drafts by keyword |
 | `mark_email_as_read` | Mark an email as read |
 | `summarize_email` | Summarize a single email |
-| `summarize_inbox` | Summarize recent inbox |
-| `create_draft` | Create a new draft (plain text or HTML) |
-| `duplicate_email_as_draft` | Duplicate an email as a new draft |
+| `summarize_inbox` | Summarize recent inbox with priority grouping |
+| `create_draft` | Create a draft (plain text or HTML) |
+| `duplicate_email_as_draft` | Duplicate an existing email as a new draft |
 
-### 📅 Outlook — Calendar
+</details>
+
+<details>
+<summary><strong>📅 Calendar</strong> — 8 tools</summary>
+
 | Tool | Description |
 |------|-------------|
 | `list_events` | List events in a date range |
@@ -41,11 +151,15 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 | `set_show_as` | Update Show As on an existing event |
 | `update_event` | Edit subject, time, location, description |
 | `delete_event` | Delete an event by ID |
-| `find_free_slots` | Find open time slots in a date range |
+| `find_free_slots` | Find open time slots between given hours |
 | `get_attendee_status` | Check meeting response statuses |
 | `get_calendars` | List available calendars |
 
-### 💬 Microsoft Teams (read-only)
+</details>
+
+<details>
+<summary><strong>💬 Teams</strong> — 5 tools (read-only)</summary>
+
 | Tool | Description |
 |------|-------------|
 | `teams_get_chats` | List recent chats and group conversations |
@@ -54,177 +168,57 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 | `teams_get_channels` | List Teams channels |
 | `teams_list_stores` | Debug: list IndexedDB object stores found |
 
----
+Teams tools work with **classic Teams 1.x** (`%AppData%\Microsoft\Teams`) and **new Teams 2.x** (`MSTeams_8wekyb3d8bbwe` MSIX install). The right path is auto-detected.
 
-## Requirements
-
-### Outlook tools
-- Windows 10 or 11
-- Microsoft Outlook installed and signed in
-- Node.js 16+
-- PowerShell 5+
-
-### Teams tools (additional)
-- Microsoft Teams installed and launched at least once
-- Python 3.9+
-- [`ccl_chromium_reader`](https://github.com/cclgroupltd/ccl_chrome_indexeddb) library
+</details>
 
 ---
 
-## Installation
+## Limitations
 
-### 1. Clone and install
-
-```powershell
-git clone https://github.com/enoquefcd/windows-outlook-mcp.git
-cd windows-outlook-mcp
-npm install
-npm run build
-```
-
-### 2. Install Python dependency (Teams tools only)
-
-```powershell
-pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git
-```
-
-### 3. Configure your MCP client
-
-#### Claude Desktop
-
-Edit `%APPDATA%\Claude\claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "windows-office": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["C:\\path\\to\\windows-outlook-mcp\\dist\\index.js"]
-    }
-  }
-}
-```
-
-#### Claude Code (native Windows)
-
-```powershell
-claude mcp add windows-office node -- "C:\path\to\windows-outlook-mcp\dist\index.js"
-```
-
-Or edit `%USERPROFILE%\.claude\settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "windows-office": {
-      "command": "node",
-      "args": ["C:\\path\\to\\windows-outlook-mcp\\dist\\index.js"]
-    }
-  }
-}
-```
-
-#### Claude Code from WSL
-
-The MCP server must run on Windows (Outlook COM only works from a Windows process). Point your WSL Claude config at the Windows Node binary:
-
-```json
-{
-  "mcpServers": {
-    "windows-office": {
-      "command": "/mnt/c/Program Files/nodejs/node.exe",
-      "args": ["/mnt/c/path/to/windows-outlook-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-> Use the Windows `node.exe` — not the WSL Node binary. The server spawns PowerShell processes that only work from a Windows process.
-
----
-
-## Usage examples
-
-```
-Summarize my inbox and flag anything urgent.
-
-Schedule a vacation from Dec 24 to Jan 2, marked as Out of Office.
-
-Find a free 1-hour slot next week between 9 AM and 6 PM.
-
-Show me recent messages in my ARCH Team chat.
-
-Search my Teams messages for "deployment plan".
-```
-
----
-
-## How it works
-
-### Outlook (COM automation)
-
-The server spawns PowerShell processes that interact with Outlook via its COM object model (`Outlook.Application`). This is the same interface used by VBA macros and the Windows Scripting Host — no credentials, no tokens, just local IPC with the running Outlook process.
-
-### Teams (local IndexedDB cache)
-
-Teams stores all chat data in a Chrome IndexedDB (LevelDB) database on disk. The server:
-
-1. Copies the LevelDB folder to a temp directory (to avoid the file lock held by the running Teams process)
-2. Reads the copy using [`ccl_chromium_reader`](https://github.com/cclgroupltd/ccl_chrome_indexeddb), a well-known forensic analysis library
-3. Parses the `conversation-manager` and `replychain-manager` databases to extract chats and messages
-4. Cleans up the temp copy
-
-Teams does **not** need to be closed. The copy-then-read approach bypasses the lock.
-
-Both classic Teams (1.x, `%AppData%\Microsoft\Teams`) and new Teams 2.x (MSIX/Store, `%LocalAppData%\Packages\MSTeams_8wekyb3d8bbwe`) are auto-detected, with new Teams taking priority.
+- **Teams is read-only** — the local cache is never written
+- **Teams member names** — display names aren't always in the local cache; GUIDs may appear
+- **Teams history** — only conversations cached locally (recently visited) are available
+- **Outlook** — requires the classic desktop app; does not work with new Outlook or Outlook web
+- **Windows only** — COM automation and the Teams cache path are Windows-specific
 
 ---
 
 ## Project structure
 
 ```
-windows-outlook-mcp/
+local-office-mcp/
 ├── src/
-│   ├── index.ts              # MCP server entry point, tool registry
-│   ├── outlook-manager.ts    # Outlook COM automation
+│   ├── index.ts              # MCP server, tool registry
+│   ├── outlook-manager.ts    # Outlook COM via PowerShell
 │   ├── teams-manager.ts      # Teams Python subprocess bridge
 │   ├── email-summarizer.ts   # Email search/summarization helpers
 │   └── draft-generator.ts    # Draft generation helpers
 ├── scripts/
-│   ├── read_teams_idb.py     # Python script: reads Teams IndexedDB
+│   ├── read_teams_idb.py     # Reads Teams IndexedDB (Python)
 │   └── requirements.txt      # Python dependencies
-├── dist/                     # Compiled JavaScript (generated)
+├── dist/                     # Compiled JS (generated, not committed)
 ├── package.json
-├── tsconfig.json
-└── README.md
+└── tsconfig.json
 ```
-
----
-
-## Limitations
-
-| Feature | Limitation |
-|---------|------------|
-| Teams | Read-only — the local cache is never written back |
-| Teams members | Display names not always available in local cache (UUIDs may appear) |
-| Teams channels | Only channels cached locally (recently visited) are visible |
-| Outlook | Requires Outlook desktop app — does not work with Outlook web or new Outlook |
-| Platform | Windows only |
 
 ---
 
 ## Contributing
 
-PRs welcome. Keep the architecture simple — no new runtime dependencies unless strictly necessary.
+PRs welcome. Keep it simple — no new runtime dependencies unless strictly necessary.
 
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feat/my-feature`
-3. Commit using [Conventional Commits](https://www.conventionalcommits.org): `feat: add X`
-4. Open a pull request
+```bash
+git checkout -b feat/my-feature
+# hack hack hack
+git commit -m "feat: add X"
+# open a PR
+```
+
+Uses [Conventional Commits](https://www.conventionalcommits.org).
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
