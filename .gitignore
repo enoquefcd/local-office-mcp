@@ -6,3 +6,4 @@ package-lock.json
 *.js.map
 __pycache__/
 *.pyc
+dist/

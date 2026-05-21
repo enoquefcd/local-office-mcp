@@ -10,14 +10,26 @@
     "dev": "tsc && node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.13.3",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
     "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
   },
-  "keywords": ["mcp", "outlook", "teams", "email", "calendar", "microsoft", "windows", "local", "offline"],
+  "keywords": [
+    "mcp",
+    "outlook",
+    "teams",
+    "email",
+    "calendar",
+    "microsoft",
+    "windows",
+    "local",
+    "offline"
+  ],
   "author": "",
   "license": "MIT"
 }

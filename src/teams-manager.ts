@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -32,9 +33,51 @@ const IS_WSL = process.platform === 'linux' &&
    require('fs').existsSync('/proc/version') &&
      require('fs').readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'));
 
+function getWindowsPythonCandidates(): string[] {
+  const standard = ['py.exe', 'python3.exe', 'python.exe'];
+  if (process.env.LOCALAPPDATA) {
+    const base = process.env.LOCALAPPDATA;
+    for (const sub of ['Python', 'Programs\\Python']) {
+      const dir = `${base}\\${sub}`;
+      try {
+        const entries = readdirSync(dir);
+        for (const entry of entries.sort().reverse()) {
+          standard.push(`${dir}\\${entry}\\python.exe`);
+        }
+      } catch { /* dir doesn't exist */ }
+    }
+  }
+  return standard;
+}
+
 const PYTHON_CANDIDATES = IS_WSL
   ? ['python3', 'python']
-  : ['python.exe', 'python3.exe', 'py.exe'];
+  : getWindowsPythonCandidates();
+
+let detectedPython: string | null | undefined = undefined;
+
+async function detectPython(): Promise<string | null> {
+  if (detectedPython !== undefined) return detectedPython;
+  if (process.env.PYTHON) {
+    detectedPython = process.env.PYTHON;
+    return detectedPython;
+  }
+  const check = (exe: string) => new Promise<boolean>((resolve) => {
+    const p = spawn(exe, ['-c', 'import ccl_chromium_reader'], {
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(code === 0));
+  });
+  for (const candidate of PYTHON_CANDIDATES) {
+    if (await check(candidate)) {
+      detectedPython = candidate;
+      return candidate;
+    }
+  }
+  detectedPython = null;
+  return null;
+}
 
 export class TeamsManager {
   private scriptPath: string;
@@ -60,11 +103,13 @@ export class TeamsManager {
       args.push('--idb_path', this.idbPathOverride);
     }
 
-    return new Promise((resolve, reject) => {
-      const tryPython = async (candidates: string[]): Promise<void> => {
-        const pythonExe = candidates[0];
-        const remaining = candidates.slice(1);
+    const pythonExe = await detectPython();
+    if (!pythonExe) {
+      throw new Error('No compatible Python found. Install Python 3.10+ and run: pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git');
+    }
 
+    return new Promise((resolve, reject) => {
+      const runPython = (): void => {
         const py = spawn(pythonExe, args, {
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
         });
@@ -77,12 +122,8 @@ export class TeamsManager {
         py.stdout.on('data', (d) => { stdout += d; });
         py.stderr.on('data', (d) => { stderr += d; });
 
-        py.on('error', (err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT' && remaining.length > 0) {
-            tryPython(remaining).then(resolve).catch(reject);
-          } else {
-            reject(new Error(`Python not found. Install Python 3 and run: pip install ccl-chromium-indexeddb`));
-          }
+        py.on('error', () => {
+          reject(new Error(`Failed to spawn Python: ${pythonExe}`));
         });
 
         py.on('close', (code) => {
@@ -104,7 +145,7 @@ export class TeamsManager {
         });
       };
 
-      tryPython(PYTHON_CANDIDATES).catch(reject);
+      runPython();
     });
   }
 

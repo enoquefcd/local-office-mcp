@@ -2,10 +2,12 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import express from 'express';
 import { OutlookManager, EmailMessage, EmailDraft } from './outlook-manager.js';
 import { TeamsManager } from './teams-manager.js';
 
@@ -982,9 +984,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('Outlook MCP Server running on stdio');
+  const portArg = process.argv.indexOf('--port');
+  const port = portArg !== -1 ? parseInt(process.argv[portArg + 1], 10) : null;
+
+  if (port) {
+    const app = express();
+    app.use(express.json());
+
+    // Stateless: fresh transport per request — no session state needed for tool calls
+    app.all('/mcp', async (req, res) => {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    app.listen(port, '0.0.0.0', () => {
+      console.error(`Outlook MCP Server running on http://0.0.0.0:${port}/mcp`);
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('Outlook MCP Server running on stdio');
+  }
 }
 
 runServer().catch(console.error);

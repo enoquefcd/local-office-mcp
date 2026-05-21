@@ -30,7 +30,7 @@ Just your local Outlook COM interface and the Teams cache on disk.
 │                  AI Assistant                   │
 │              (Claude, Cursor, etc.)             │
 └──────────────────┬──────────────────────────────┘
-                   │ MCP (stdio)
+                   │ MCP (stdio or HTTP)
 ┌──────────────────▼──────────────────────────────┐
 │              local-office-mcp                   │
 │               Node.js / TypeScript              │
@@ -49,6 +49,10 @@ Just your local Outlook COM interface and the Teams cache on disk.
   └─────────────┘         └──────────────┘
 ```
 
+Two transport modes:
+- **stdio** — default; AI client spawns the process directly. Windows only (COM constraint).
+- **HTTP** — run the server once with `--port <N>`; any client on the same machine connects via `http://localhost:<N>/mcp`. Useful for WSL or multi-client setups.
+
 - **Outlook** — spawns PowerShell to talk to `Outlook.Application` via COM. Same interface VBA macros use; no credentials needed.
 - **Teams** — copies the local LevelDB cache to a temp folder (bypassing the file lock) and reads it with [`ccl_chromium_reader`](https://github.com/cclgroupltd/ccl_chrome_indexeddb). Teams stays open; data is never written back.
 
@@ -57,15 +61,23 @@ Just your local Outlook COM interface and the Teams cache on disk.
 ## Quick start
 
 ```powershell
-# 1. clone & build
+# 1. clone & build (Windows)
 git clone https://github.com/enoquefcd/local-office-mcp.git
 cd local-office-mcp
 npm install && npm run build
 
 # 2. Teams support (optional)
 pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git
+```
 
-# 3. wire up Claude Code (Windows)
+Then pick your transport:
+
+### stdio — Windows native (Claude Desktop / Claude Code on Windows)
+
+The AI client spawns the server on demand. Nothing needs to be running beforehand.
+
+```powershell
+# Claude Code
 claude mcp add local-office node -- "C:\path\to\local-office-mcp\dist\index.js"
 ```
 
@@ -78,7 +90,6 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 {
   "mcpServers": {
     "local-office": {
-      "type": "stdio",
       "command": "node",
       "args": ["C:\\path\\to\\local-office-mcp\\dist\\index.js"]
     }
@@ -87,24 +98,52 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 ```
 </details>
 
-<details>
-<summary>Claude Code from WSL</summary>
+### HTTP — WSL2 / multi-client
 
-The server must run as a Windows process (Outlook COM only works on Windows). Point WSL's Claude config at the Windows `node.exe`:
+WSL cannot use Windows COM. The server runs as a persistent Windows process; clients connect via HTTP. You must keep it running (or auto-start it).
+
+**Step 1 — start the server on Windows** (run once, keep it alive):
+
+```powershell
+node "C:\path\to\local-office-mcp\dist\index.js" --port 3333
+```
+
+To auto-start silently on login, create a `.vbs` file in your Startup folder
+(`shell:startup` in Run dialog):
+
+```vbscript
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run Chr(34) & "C:\Program Files\nodejs\node.exe" & Chr(34) & _
+  " " & Chr(34) & "C:\path\to\local-office-mcp\dist\index.js" & Chr(34) & _
+  " --port 3333", 0, False
+```
+
+**Step 2 — find your Windows host IP from WSL**:
+
+```bash
+ip route | grep default | awk '{print $3}'
+# e.g. 172.30.240.1
+```
+
+For a stable hostname, add it to `/etc/hosts`:
+```bash
+echo "$(ip route | grep default | awk '{print $3}') windows-host" | sudo tee -a /etc/hosts
+```
+
+**Step 3 — configure the MCP client** (`~/.claude.json` or equivalent):
 
 ```json
 {
   "mcpServers": {
     "local-office": {
-      "command": "/mnt/c/Program Files/nodejs/node.exe",
-      "args": ["/mnt/c/path/to/local-office-mcp/dist/index.js"]
+      "type": "http",
+      "url": "http://windows-host:3333/mcp"
     }
   }
 }
 ```
 
-> Use the Windows `node.exe` — not the WSL Node binary.
-</details>
+> The server binds `0.0.0.0`, so it's reachable from WSL via the gateway IP even in NAT mode. `localhost` does **not** work in WSL2 NAT mode.</details>
 
 ---
 

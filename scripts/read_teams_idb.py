@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Read Microsoft Teams local IndexedDB cache (read-only, no API needed).
 Requires: pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git
