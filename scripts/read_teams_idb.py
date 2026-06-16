@@ -5,13 +5,26 @@ Read Microsoft Teams local IndexedDB cache (read-only, no API needed).
 Requires: pip install git+https://github.com/cclgroupltd/ccl_chrome_indexeddb.git
 
 Works while Teams is running — copies LevelDB to a temp folder before reading.
+
+Performance model
+-----------------
+Deserializing the Teams LevelDB (V8 records, ~50 MB) costs ~25 s of CPU per
+run. Doing that on every tool call made parallel queries time out. Instead we
+parse the whole reply-chain + conversation stores ONCE into a small on-disk
+SQLite index and serve every subsequent query from it in milliseconds. The
+index is reused for `TEAMS_CACHE_TTL` seconds (default 300) and rebuilt under a
+lock so concurrent cold calls only pay the parse cost once. Pass --refresh to
+force a rebuild.
 """
 
 import sys
 import json
 import os
 import re
+import time
 import shutil
+import sqlite3
+import hashlib
 import tempfile
 import argparse
 from pathlib import Path
@@ -91,22 +104,15 @@ def find_teams_idb() -> Path | None:
 
 def open_idb(ldb_path: Path) -> tuple:
     """
-    Copy LevelDB (and blob dir if present) to a temp folder and open.
-    The original is locked by Teams; the copy is not.
+    Copy LevelDB to a temp folder and open. The original is locked by Teams;
+    the copy is not. The .blob sidecar holds attachments/media only (no message
+    text), so we skip it — saves a copy and is irrelevant to the text stores.
     Returns (WrappedIndexDB, tmp_root). Caller must shutil.rmtree(tmp_root).
     """
     tmp_root = Path(tempfile.mkdtemp(prefix="teams_idb_"))
     dst_ldb = tmp_root / ldb_path.name
     shutil.copytree(ldb_path, dst_ldb, ignore=shutil.ignore_patterns("LOCK"))
-
-    # blob dir lives next to the .leveldb folder with the same stem + .blob
-    blob_src = ldb_path.parent / ldb_path.name.replace(".leveldb", ".blob")
-    dst_blob = None
-    if blob_src.exists():
-        dst_blob = tmp_root / blob_src.name
-        shutil.copytree(blob_src, dst_blob)
-
-    return idb.WrappedIndexDB(dst_ldb, dst_blob), tmp_root
+    return idb.WrappedIndexDB(dst_ldb, None), tmp_root
 
 
 # ---------------------------------------------------------------------------
@@ -199,137 +205,302 @@ def _display_name(conv: dict) -> str:
     return _to_str(tp.get("topic") or conv.get("displayName") or conv.get("id", ""))
 
 
+def _msg_time(msg: dict):
+    """Arrival time as a number when possible (ms epoch), else raw/empty."""
+    t = msg.get("originalArrivalTime")
+    if t is None:
+        t = msg.get("clientArrivalTime", "")
+    if isinstance(t, (int, float)):
+        return t
+    s = _to_str(t)
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return s
+
+
 # ---------------------------------------------------------------------------
-# Actions
+# SQLite index cache
 # ---------------------------------------------------------------------------
 
-def action_list_dbs(widb) -> dict:
-    return {"data": [db_id.name for db_id in widb.database_ids]}
+_DEFAULT_TTL = int(os.environ.get("TEAMS_CACHE_TTL", "300"))
+_STALE_LOCK_S = 120        # steal a build lock older than this (build is ~25s)
+_BUILD_WAIT_S = 240        # max time to wait for another process's build
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS messages (
+    id          TEXT PRIMARY KEY,
+    chat_id     TEXT,
+    sender      TEXT,
+    content     TEXT,
+    content_lc  TEXT,
+    time        REAL,
+    type        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, time);
+CREATE INDEX IF NOT EXISTS idx_messages_lc   ON messages(content_lc);
+CREATE TABLE IF NOT EXISTS conversations (
+    id           TEXT PRIMARY KEY,
+    display_name TEXT,
+    type         TEXT,
+    thread_type  TEXT,
+    team_id      TEXT,
+    members      TEXT
+);
+"""
 
 
-def action_get_chats(widb, count: int) -> dict:
-    db = _get_wrapped_db(widb, "conversation-manager")
-    if db is None:
-        return {"error": "conversation-manager database not found"}
+def _cache_dir(ldb_path: Path) -> Path:
+    key = hashlib.md5(str(ldb_path).encode("utf-8")).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / f"teams_idb_cache_{key}"
 
-    seen = set()
+
+def _cache_is_fresh(db_path: Path, stamp_path: Path, ttl: int) -> bool:
+    if not db_path.exists():
+        return False
+    try:
+        built_at = float(stamp_path.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return (time.time() - built_at) < ttl
+
+
+def _build_index(ldb_path: Path, db_path: Path) -> None:
+    """Parse the whole IDB once and write a fresh SQLite index atomically."""
+    widb, tmp_root = open_idb(ldb_path)
+    tmp_db = db_path.with_name(db_path.name + f".tmp-{os.getpid()}")
+    try:
+        if tmp_db.exists():
+            tmp_db.unlink()
+        con = sqlite3.connect(str(tmp_db))
+        try:
+            con.executescript(_SCHEMA)
+
+            rc_db = _get_wrapped_db(widb, "replychain-manager")
+            if rc_db is not None:
+                msg_rows = []
+                for chain in _iter_store(rc_db, "replychains"):
+                    conv_id = _to_str(chain.get("conversationId", ""))
+                    for msg in (chain.get("messageMap") or {}).values():
+                        if not isinstance(msg, dict):
+                            continue
+                        mtype = msg.get("messageType", "")
+                        if mtype not in ("RichText/Html", "Text", ""):
+                            continue
+                        content = _strip_html(msg.get("content", ""))
+                        if not content:
+                            continue
+                        msg_rows.append((
+                            str(msg.get("id", "")),
+                            conv_id,
+                            _sender(msg.get("from") or msg.get("imDisplayName")),
+                            content,
+                            content.lower(),
+                            _msg_time(msg),
+                            _to_str(mtype),
+                        ))
+                con.executemany(
+                    "INSERT OR REPLACE INTO messages "
+                    "(id, chat_id, sender, content, content_lc, time, type) "
+                    "VALUES (?,?,?,?,?,?,?)", msg_rows)
+
+            cm_db = _get_wrapped_db(widb, "conversation-manager")
+            if cm_db is not None:
+                conv_rows = []
+                for conv in _iter_store(cm_db, "conversations"):
+                    cid = _to_str(conv.get("id", ""))
+                    if not cid:
+                        continue
+                    conv_rows.append((
+                        cid,
+                        _display_name(conv),
+                        _to_str(conv.get("type", "")),
+                        _to_str(conv.get("threadType", "")),
+                        _to_str(conv.get("teamId", "")),
+                        json.dumps(_members_from_conv(conv), ensure_ascii=False),
+                    ))
+                con.executemany(
+                    "INSERT OR REPLACE INTO conversations "
+                    "(id, display_name, type, thread_type, team_id, members) "
+                    "VALUES (?,?,?,?,?,?)", conv_rows)
+
+            con.commit()
+        finally:
+            con.close()
+        os.replace(str(tmp_db), str(db_path))
+    finally:
+        if tmp_db.exists():
+            tmp_db.unlink()
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def get_index(ldb_path: Path, ttl: int, refresh: bool) -> Path:
+    """
+    Return a path to a fresh SQLite index, building it under a lock if needed.
+    Concurrent cold callers wait for the in-progress build instead of each
+    re-parsing the 50 MB LevelDB.
+    """
+    cache_dir = _cache_dir(ldb_path)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    db_path = cache_dir / "index.sqlite"
+    stamp_path = cache_dir / "built_at"
+    lock_path = cache_dir / "build.lock"
+
+    if not refresh and _cache_is_fresh(db_path, stamp_path, ttl):
+        return db_path
+
+    # Try to become the builder.
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break  # we hold the lock
+        except FileExistsError:
+            # Someone else is building. Wait for their result.
+            waited = 0.0
+            while waited < _BUILD_WAIT_S:
+                if _cache_is_fresh(db_path, stamp_path, ttl):
+                    return db_path
+                # Steal a stale/abandoned lock.
+                try:
+                    if (time.time() - lock_path.stat().st_mtime) > _STALE_LOCK_S:
+                        lock_path.unlink(missing_ok=True)
+                        break
+                except OSError:
+                    break  # lock vanished — retry acquire
+                time.sleep(0.3)
+                waited += 0.3
+            else:
+                # Waited too long; fall back to building ourselves.
+                lock_path.unlink(missing_ok=True)
+            continue  # retry acquire
+
+    try:
+        # Double-check: another builder may have finished between our checks.
+        if refresh or not _cache_is_fresh(db_path, stamp_path, ttl):
+            _build_index(ldb_path, db_path)
+            stamp_path.write_text(str(time.time()))
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+    return db_path
+
+
+def _connect_ro(db_path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _like_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# ---------------------------------------------------------------------------
+# Actions (served from the SQLite index)
+# ---------------------------------------------------------------------------
+
+def action_get_chats(db_path: Path, count: int) -> dict:
+    con = _connect_ro(db_path)
+    try:
+        rows = con.execute(
+            "SELECT id, display_name, type, thread_type, members "
+            "FROM conversations "
+            "WHERE thread_type != 'streamofnotifications' "
+            "LIMIT ?", (count,)).fetchall()
+    finally:
+        con.close()
     chats = []
-    for conv in _iter_store(db, "conversations"):
-        cid = conv.get("id", "")
-        if not cid or cid in seen:
-            continue
-        ttype = conv.get("threadType", "")
-        if ttype in ("streamofnotifications",):
-            continue
-        seen.add(cid)
+    for r in rows:
+        try:
+            members = json.loads(r["members"]) if r["members"] else []
+        except (ValueError, TypeError):
+            members = []
         chats.append({
-            "id": cid,
-            "displayName": _display_name(conv),
-            "type": conv.get("type", ""),
-            "threadType": ttype,
-            "members": _members_from_conv(conv),
+            "id": r["id"],
+            "displayName": r["display_name"],
+            "type": r["type"],
+            "threadType": r["thread_type"],
+            "members": members,
         })
-        if len(chats) >= count:
-            break
-
     return {"data": chats}
 
 
-def action_get_messages(widb, chat_id: str, count: int) -> dict:
-    db = _get_wrapped_db(widb, "replychain-manager")
-    if db is None:
-        return {"error": "replychain-manager database not found"}
-
-    messages = []
-    for chain in _iter_store(db, "replychains"):
-        if chain.get("conversationId") != chat_id:
-            continue
-        msg_map = chain.get("messageMap") or {}
-        for msg in msg_map.values():
-            if not isinstance(msg, dict):
-                continue
-            mtype = msg.get("messageType", "")
-            if mtype not in ("RichText/Html", "Text", ""):
-                continue
-            content = _strip_html(msg.get("content", ""))
-            if not content:
-                continue
-            messages.append({
-                "id": str(msg.get("id", "")),
-                "content": content,
-                "from": _sender(msg.get("from") or msg.get("imDisplayName")),
-                "time": msg.get("originalArrivalTime") or msg.get("clientArrivalTime", ""),
-                "chat_id": chat_id,
-                "type": mtype,
-            })
-            if len(messages) >= count:
-                break
-        if len(messages) >= count:
-            break
-
-    messages.sort(key=lambda m: m["time"])
+def action_get_messages(db_path: Path, chat_id: str, count: int) -> dict:
+    con = _connect_ro(db_path)
+    try:
+        rows = con.execute(
+            "SELECT id, chat_id, sender, content, time, type "
+            "FROM messages WHERE chat_id = ? "
+            "ORDER BY time ASC LIMIT ?", (chat_id, count)).fetchall()
+    finally:
+        con.close()
+    messages = [{
+        "id": r["id"],
+        "content": r["content"],
+        "from": r["sender"],
+        "time": r["time"],
+        "chat_id": r["chat_id"],
+        "type": r["type"],
+    } for r in rows]
     return {"data": messages}
 
 
-def action_search_messages(widb, query: str, count: int) -> dict:
-    db = _get_wrapped_db(widb, "replychain-manager")
-    if db is None:
-        return {"error": "replychain-manager database not found"}
-
-    q = query.lower()
-    results = []
-    for chain in _iter_store(db, "replychains"):
-        msg_map = chain.get("messageMap") or {}
-        conv_id = chain.get("conversationId", "")
-        for msg in msg_map.values():
-            if not isinstance(msg, dict):
-                continue
-            content = _strip_html(msg.get("content", ""))
-            if not content or q not in content.lower():
-                continue
-            results.append({
-                "id": str(msg.get("id", "")),
-                "content": content,
-                "from": _sender(msg.get("from") or msg.get("imDisplayName")),
-                "time": msg.get("originalArrivalTime") or msg.get("clientArrivalTime", ""),
-                "chat_id": conv_id,
-            })
-            if len(results) >= count:
-                break
-        if len(results) >= count:
-            break
-
+def action_search_messages(db_path: Path, query: str, count: int) -> dict:
+    pattern = f"%{_like_escape(query.lower())}%"
+    con = _connect_ro(db_path)
+    try:
+        rows = con.execute(
+            "SELECT id, chat_id, sender, content, time "
+            "FROM messages WHERE content_lc LIKE ? ESCAPE '\\' "
+            "ORDER BY time DESC LIMIT ?", (pattern, count)).fetchall()
+    finally:
+        con.close()
+    results = [{
+        "id": r["id"],
+        "content": r["content"],
+        "from": r["sender"],
+        "time": r["time"],
+        "chat_id": r["chat_id"],
+    } for r in rows]
     return {"data": results}
 
 
-def action_get_channels(widb, count: int) -> dict:
-    db = _get_wrapped_db(widb, "conversation-manager")
-    if db is None:
-        return {"error": "conversation-manager database not found"}
+_CHANNEL_TYPES = {"General", "Regular", "channel", "Topic"}
 
-    # Classic Teams: channels have type=Topic or threadType in General/Regular/channel
-    _CHANNEL_TYPES = {"General", "Regular", "channel", "Topic"}
-    seen = set()
+
+def action_get_channels(db_path: Path, count: int) -> dict:
+    con = _connect_ro(db_path)
+    try:
+        rows = con.execute(
+            "SELECT id, display_name, type, thread_type, team_id "
+            "FROM conversations").fetchall()
+    finally:
+        con.close()
     channels = []
-    for conv in _iter_store(db, "conversations"):
-        ctype = _to_str(conv.get("type", ""))
-        ttype = _to_str(conv.get("threadType", ""))
+    for r in rows:
+        ctype, ttype = r["type"], r["thread_type"]
         if ctype not in _CHANNEL_TYPES and ttype not in _CHANNEL_TYPES:
             continue
-        cid = _to_str(conv.get("id", ""))
-        if not cid or cid in seen:
-            continue
-        seen.add(cid)
         channels.append({
-            "id": cid,
-            "channelName": _display_name(conv),
-            "teamId": _to_str(conv.get("teamId", "")),
+            "id": r["id"],
+            "channelName": r["display_name"],
+            "teamId": r["team_id"],
             "type": ctype or ttype,
         })
         if len(channels) >= count:
             break
-
     return {"data": channels}
+
+
+def action_list_dbs(ldb_path: Path) -> dict:
+    """Debug: list raw object-store databases. Reads the IDB directly."""
+    widb, tmp_root = open_idb(ldb_path)
+    try:
+        return {"data": [db_id.name for db_id in widb.database_ids]}
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +517,10 @@ def main():
     parser.add_argument("--query",   default=None)
     parser.add_argument("--idb_path", default=None,
                         help="Override auto-detected LevelDB path")
+    parser.add_argument("--ttl", type=int, default=_DEFAULT_TTL,
+                        help="Reuse the SQLite index for this many seconds")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Force a rebuild of the SQLite index")
     args = parser.parse_args()
 
     ldb_path = Path(args.idb_path) if args.idb_path else find_teams_idb()
@@ -360,37 +535,29 @@ def main():
         }))
         sys.exit(1)
 
-    tmp_root = None
-    try:
-        widb, tmp_root = open_idb(ldb_path)
-    except Exception as e:
-        print(json.dumps({"error": f"Cannot open Teams database: {e}"}))
-        sys.exit(1)
-
     try:
         if args.action == "list_stores":
-            result = action_list_dbs(widb)
-        elif args.action == "get_chats":
-            result = action_get_chats(widb, args.count)
-        elif args.action == "get_messages":
-            if not args.chat_id:
-                result = {"error": "--chat_id is required"}
-            else:
-                result = action_get_messages(widb, args.chat_id, args.count)
-        elif args.action == "search_messages":
-            if not args.query:
-                result = {"error": "--query is required"}
-            else:
-                result = action_search_messages(widb, args.query, args.count)
-        elif args.action == "get_channels":
-            result = action_get_channels(widb, args.count)
+            result = action_list_dbs(ldb_path)
         else:
-            result = {"error": f"Unknown action: {args.action}"}
+            db_path = get_index(ldb_path, args.ttl, args.refresh)
+            if args.action == "get_chats":
+                result = action_get_chats(db_path, args.count)
+            elif args.action == "get_messages":
+                if not args.chat_id:
+                    result = {"error": "--chat_id is required"}
+                else:
+                    result = action_get_messages(db_path, args.chat_id, args.count)
+            elif args.action == "search_messages":
+                if not args.query:
+                    result = {"error": "--query is required"}
+                else:
+                    result = action_search_messages(db_path, args.query, args.count)
+            elif args.action == "get_channels":
+                result = action_get_channels(db_path, args.count)
+            else:
+                result = {"error": f"Unknown action: {args.action}"}
     except Exception as e:
         result = {"error": str(e)}
-    finally:
-        if tmp_root:
-            shutil.rmtree(tmp_root, ignore_errors=True)
 
     print(json.dumps(result, ensure_ascii=False, default=str))
 
