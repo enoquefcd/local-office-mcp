@@ -4,6 +4,9 @@
   "description": "Local MCP server for Outlook (email + calendar) and Teams — no cloud, no OAuth",
   "main": "dist/index.js",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",

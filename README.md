@@ -1,7 +1,7 @@
 # local-office-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-16%2B-green.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-22%2B-green.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4.svg)](#requirements)
@@ -64,6 +64,7 @@ Two transport modes:
 # 1. clone & build (Windows)
 git clone https://github.com/enoquefcd/local-office-mcp.git
 cd local-office-mcp
+node --version  # must be v22 or newer
 npm install && npm run build
 
 # 2. Teams support (optional)
@@ -153,7 +154,7 @@ echo "$(ip route | grep default | awk '{print $3}') windows-host" | sudo tee -a 
 |------------|:---:|:---:|
 | Windows 10/11 | ✅ | ✅ |
 | Microsoft Outlook (desktop) | ✅ | — |
-| Node.js 16+ | ✅ | ✅ |
+| Node.js 22+ | ✅ | ✅ |
 | PowerShell 5+ | ✅ | — |
 | Microsoft Teams (installed + opened at least once) | — | ✅ |
 | Python 3.9+ | — | ✅ |
