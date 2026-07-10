@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { writeFileSync } from 'fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -15,6 +15,17 @@ export interface EmailMessage {
   hasAttachments: boolean;
 }
 
+export interface EmailAttachment {
+  /** Filename shown in Outlook (e.g. "meme.jpg"). Required with content_base64. */
+  name?: string;
+  /** Base64-encoded file content; written to a temp file and attached by value. */
+  content_base64?: string;
+  /** Absolute Windows path to an existing file — alternative to content_base64. */
+  path?: string;
+  /** Content-ID: makes this an inline attachment referenced as <img src="cid:VALUE"> in the HTML body. */
+  cid?: string;
+}
+
 export interface EmailDraft {
   to: string[];
   cc?: string[];
@@ -22,6 +33,7 @@ export interface EmailDraft {
   subject: string;
   body: string;
   isHtml?: boolean;
+  attachments?: EmailAttachment[];
 }
 
 export class OutlookManager {
@@ -345,6 +357,49 @@ export class OutlookManager {
       bodyAssignment = `$mail.Body = "${formattedBody.replace(/"/g, '""')}"`;
     }
 
+    // Attachments: base64 payloads land in a per-draft temp dir (so Outlook picks
+    // up the real filename as the display name); paths are attached as-is.
+    // olByValue copies the file into the item at Add() time, so temp files can be
+    // deleted as soon as the script finishes. A cid turns the attachment into an
+    // inline image (PR_ATTACH_CONTENT_ID) hidden from the paperclip list
+    // (PR_ATTACHMENT_HIDDEN) — attach BEFORE setting HTMLBody so cid: references resolve.
+    const tempDirs: string[] = [];
+    const attachmentLines: string[] = [];
+    for (const [i, att] of (draft.attachments ?? []).entries()) {
+      let filePath: string;
+      if (att.content_base64) {
+        const safeName = (att.name || `attachment-${i + 1}`).replace(/[\\/:*?"<>|]/g, '_');
+        const dir = mkdtempSync(join(tmpdir(), 'fhacc-att-'));
+        tempDirs.push(dir);
+        filePath = join(dir, safeName);
+        writeFileSync(filePath, Buffer.from(att.content_base64, 'base64'));
+      } else if (att.path) {
+        filePath = att.path;
+      } else {
+        tempDirs.forEach(d => rmSync(d, { recursive: true, force: true }));
+        throw new Error(`Attachment ${i + 1}: either content_base64 or path is required`);
+      }
+      const winPath = filePath.replace(/\\/g, '\\\\');
+      attachmentLines.push(`$att = $mail.Attachments.Add("${winPath}", 1)`);
+      if (att.cid) {
+        const safeCid = att.cid.replace(/[^A-Za-z0-9._@-]/g, '');
+        attachmentLines.push(
+          `$att.PropertyAccessor.SetProperty("http://schemas.microsoft.com/mapi/proptag/0x3712001F", "${safeCid}")`,
+          `try { $att.PropertyAccessor.SetProperty("http://schemas.microsoft.com/mapi/proptag/0x7FFE000B", $true) } catch {}`
+        );
+      }
+    }
+
+    const recipientBlock = (addresses: string[] | undefined, olType: number) => {
+      const list = (addresses ?? []).filter(a => a && a.trim());
+      if (list.length === 0) return '';
+      return `
+        foreach ($recipient in @("${list.join('","')}")) {
+          $r = $mail.Recipients.Add($recipient.Trim())
+          $r.Type = ${olType}
+        }`;
+    };
+
     const script = `
       try {
         Add-Type -AssemblyName "Microsoft.Office.Interop.Outlook"
@@ -352,13 +407,9 @@ export class OutlookManager {
         $mail = $outlook.CreateItem(0)
 
         $mail.Subject = "${cleanSubject.replace(/"/g, '""')}"
+        ${attachmentLines.join('\n        ')}
         ${bodyAssignment}
-
-        foreach ($recipient in @("${draft.to.join('","')}")) {
-          if ($recipient.Trim()) {
-            $mail.Recipients.Add($recipient.Trim()) | Out-Null
-          }
-        }
+        ${recipientBlock(draft.to, 1)}${recipientBlock(draft.cc, 2)}${recipientBlock(draft.bcc, 3)}
 
         $mail.Recipients.ResolveAll() | Out-Null
         $mail.Save()
@@ -369,11 +420,15 @@ export class OutlookManager {
       }
     `;
 
-    const result = await this.executePowerShell(script);
-    if (result.startsWith('error:')) {
-      throw new Error(result.substring(7));
+    try {
+      const result = await this.executePowerShell(script);
+      if (result.startsWith('error:')) {
+        throw new Error(result.substring(7));
+      }
+      return 'Draft created successfully';
+    } finally {
+      tempDirs.forEach(d => rmSync(d, { recursive: true, force: true }));
     }
-    return 'Draft created successfully';
   }
 
   async markAsRead(id: string): Promise<void> {

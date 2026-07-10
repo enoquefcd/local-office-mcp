@@ -119,6 +119,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "array",
               items: { type: "string" },
               description: "BCC email addresses"
+            },
+            attachments: {
+              type: "array",
+              description: "Optional attachments. Each item needs either content_base64 (+ name) or a Windows-accessible path. Set cid to embed the file as an inline image referenced from the HTML body.",
+              items: {
+                type: "object",
+                properties: {
+                  name: {
+                    type: "string",
+                    description: "Attachment filename, e.g. meme.jpg (required with content_base64)"
+                  },
+                  content_base64: {
+                    type: "string",
+                    description: "Base64-encoded file content"
+                  },
+                  path: {
+                    type: "string",
+                    description: "Absolute Windows path to an existing file (alternative to content_base64)"
+                  },
+                  cid: {
+                    type: "string",
+                    description: "Content-ID for inline images: reference it in the HTML body as <img src=\"cid:VALUE\">. Inline attachments are hidden from the attachment list. Requires isHtml: true."
+                  }
+                }
+              }
             }
           },
           required: ["to", "subject", "body"]
@@ -598,13 +623,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isHtml: !!(args as any)?.isHtml,
           cc: (args as any)?.cc,
           bcc: (args as any)?.bcc,
+          attachments: (args as any)?.attachments,
         };
         const result = await outlookManager.createDraft(draft);
+        const attachmentCount = draft.attachments?.length ?? 0;
         return {
           content: [
             {
               type: 'text',
-              text: `✅ **Email Draft Created Successfully**\n\n**Subject:** ${draft.subject}\n**To:** ${draft.to.join(', ')}\n${draft.cc ? `**CC:** ${draft.cc.join(', ')}\n` : ''}**Result:** ${result}`,
+              text: `✅ **Email Draft Created Successfully**\n\n**Subject:** ${draft.subject}\n**To:** ${draft.to.join(', ')}\n${draft.cc ? `**CC:** ${draft.cc.join(', ')}\n` : ''}${attachmentCount ? `**Attachments:** ${attachmentCount}\n` : ''}**Result:** ${result}`,
             },
           ],
         };

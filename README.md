@@ -179,7 +179,7 @@ echo "$(ip route | grep default | awk '{print $3}') windows-host" | sudo tee -a 
 | `mark_email_as_read` | Mark an email as read |
 | `summarize_email` | Summarize a single email |
 | `summarize_inbox` | Summarize recent inbox with priority grouping |
-| `create_draft` | Create a draft (plain text or HTML) |
+| `create_draft` | Create a draft (plain text or HTML, with attachments incl. CID inline images) |
 | `duplicate_email_as_draft` | Duplicate an existing email as a new draft |
 
 </details>
