@@ -26,6 +26,23 @@ const server = new Server(
 const outlookManager = new OutlookManager();
 const teamsManager = new TeamsManager();
 
+// LLM clients (and clients holding a stale tool schema) sometimes send array
+// parameters as a JSON string — tolerate both shapes.
+function parseAttachments(raw: unknown): EmailDraft['attachments'] {
+  if (raw == null) return undefined;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      throw new Error('attachments must be an array (or a JSON string encoding one)');
+    }
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('attachments must be an array');
+  }
+  return raw as EmailDraft['attachments'];
+}
+
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -623,7 +640,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isHtml: !!(args as any)?.isHtml,
           cc: (args as any)?.cc,
           bcc: (args as any)?.bcc,
-          attachments: (args as any)?.attachments,
+          attachments: parseAttachments((args as any)?.attachments),
         };
         const result = await outlookManager.createDraft(draft);
         const attachmentCount = draft.attachments?.length ?? 0;
