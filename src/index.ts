@@ -26,6 +26,19 @@ const server = new Server(
 const outlookManager = new OutlookManager();
 const teamsManager = new TeamsManager();
 
+// `new Date("2026-08-18")` is midnight UTC, which is the previous day — or an
+// hour into the day — depending on the offset. Calendar windows are meant as
+// local dates, so anchor a bare YYYY-MM-DD to local midnight instead.
+function parseCalendarDate(raw: unknown): Date {
+  if (typeof raw === 'string') {
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (dateOnly) {
+      return new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]));
+    }
+  }
+  return new Date(raw as string);
+}
+
 // LLM clients (and clients holding a stale tool schema) sometimes send array
 // parameters as a JSON string — tolerate both shapes.
 function parseAttachments(raw: unknown): EmailDraft['attachments'] {
@@ -828,8 +841,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_events': {
         const events = await outlookManager.listEvents({
-          startDate: new Date((args as any)?.startDate),
-          endDate: (args as any)?.endDate ? new Date((args as any)?.endDate) : undefined,
+          startDate: parseCalendarDate((args as any)?.startDate),
+          endDate: (args as any)?.endDate ? parseCalendarDate((args as any)?.endDate) : undefined,
           calendar: (args as any)?.calendar
         });
         return {
@@ -884,8 +897,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'find_free_slots': {
         const freeSlots = await outlookManager.findFreeSlots({
-          startDate: new Date((args as any)?.startDate),
-          endDate: (args as any)?.endDate ? new Date((args as any)?.endDate) : undefined,
+          startDate: parseCalendarDate((args as any)?.startDate),
+          endDate: (args as any)?.endDate ? parseCalendarDate((args as any)?.endDate) : undefined,
           duration: (args as any)?.duration,
           workDayStart: (args as any)?.workDayStart,
           workDayEnd: (args as any)?.workDayEnd,
