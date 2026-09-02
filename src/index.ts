@@ -11,18 +11,6 @@ import express from 'express';
 import { OutlookManager, EmailMessage, EmailDraft } from './outlook-manager.js';
 import { TeamsManager } from './teams-manager.js';
 
-const server = new Server(
-  {
-    name: 'local-office-mcp',
-    version: '1.1.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
 const outlookManager = new OutlookManager();
 const teamsManager = new TeamsManager();
 
@@ -57,6 +45,21 @@ function parseAttachments(raw: unknown): EmailDraft['attachments'] {
 }
 
 // List available tools
+// A Server accepts exactly one transport, so stateless HTTP needs a fresh one
+// per request rather than a single shared instance.
+function createServer(): Server {
+  const server = new Server(
+    {
+      name: 'local-office-mcp',
+      version: '1.1.0',
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -1040,6 +1043,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 async function runServer() {
   const portArg = process.argv.indexOf('--port');
   const port = portArg !== -1 ? parseInt(process.argv[portArg + 1], 10) : null;
@@ -1048,9 +1054,16 @@ async function runServer() {
     const app = express();
     app.use(express.json());
 
-    // Stateless: fresh transport per request — no session state needed for tool calls
+    // Stateless: a fresh Server and transport per request. Reusing either one
+    // breaks — a second server.connect() throws "Already connected to a
+    // transport", and a reused stateless transport only serves one response.
     app.all('/mcp', async (req, res) => {
+      const server = createServer();
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on('close', () => {
+        transport.close();
+        server.close();
+      });
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     });
@@ -1060,7 +1073,7 @@ async function runServer() {
     });
   } else {
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createServer().connect(transport);
     console.error('Outlook MCP Server running on stdio');
   }
 }
