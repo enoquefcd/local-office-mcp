@@ -36,6 +36,19 @@ export interface EmailDraft {
   attachments?: EmailAttachment[];
 }
 
+/**
+ * Render a date as a naive local timestamp for PowerShell.
+ *
+ * `toISOString()` cannot be used here: PowerShell parses the trailing `Z` and
+ * converts to local time, so a window starting at UTC midnight begins at 01:00
+ * in a UTC+1 zone and events in that first hour fall outside the filter.
+ */
+function toPowerShellDate(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export class OutlookManager {
   private powershellPath: string;
 
@@ -752,15 +765,20 @@ export class OutlookManager {
           $calendar = $namespace.GetDefaultFolder(9)
           `}
           
-          # Create filter for date range
-          $startDate = [DateTime]"${options.startDate.toISOString()}"
-          $endDate = [DateTime]"${endDate.toISOString()}".AddDays(1)
-          $filter = "[Start] >= '$($startDate.ToString('g'))' AND [End] <= '$($endDate.ToString('g'))'"
-          
-          # Get events
-          $items = $calendar.Items.Restrict($filter)
+          # Create filter for date range. Match anything overlapping the window,
+          # not only appointments contained by it.
+          $startDate = [DateTime]"${toPowerShellDate(options.startDate)}"
+          $endDate = ([DateTime]"${toPowerShellDate(endDate)}").AddDays(1)
+          $filter = "[Start] < '$($endDate.ToString('g'))' AND [End] > '$($startDate.ToString('g'))'"
+
+          # Get events. Sorting by [Start] and opting into recurrences must both
+          # happen before Restrict, otherwise Outlook returns only the master
+          # appointment of each series and every occurrence is invisible.
+          $items = $calendar.Items
           $items.Sort("[Start]")
-          
+          $items.IncludeRecurrences = $true
+          $items = $items.Restrict($filter)
+
           # Build JSON array
           $events = @()
           foreach ($item in $items) {
@@ -979,15 +997,23 @@ export class OutlookManager {
           `}
           
           # Get all events in date range
-          $startDate = [DateTime]"${options.startDate.toISOString()}"
-          $endDate = [DateTime]"${endDate.toISOString()}"
-          $filter = "[Start] >= '$($startDate.ToString('g'))' AND [End] <= '$($endDate.AddDays(1).ToString('g'))'"
-          $items = $calendar.Items.Restrict($filter)
-          
+          $startDate = [DateTime]"${toPowerShellDate(options.startDate)}"
+          $endDate = [DateTime]"${toPowerShellDate(endDate)}"
+          $filterEnd = $endDate.AddDays(1)
+          $filter = "[Start] < '$($filterEnd.ToString('g'))' AND [End] > '$($startDate.ToString('g'))'"
+
+          # Sorting by [Start] and opting into recurrences must both happen
+          # before Restrict, otherwise recurring meetings never show up as busy
+          # and the whole day is reported free.
+          $items = $calendar.Items
+          $items.Sort("[Start]")
+          $items.IncludeRecurrences = $true
+          $items = $items.Restrict($filter)
+
           # Build busy slots array
           $busySlots = @()
           foreach ($item in $items) {
-            if ($item.BusyStatus -eq 2 -or $item.BusyStatus -eq 3) { # Busy or OutOfOffice
+            if ($item.BusyStatus -eq 1 -or $item.BusyStatus -eq 2 -or $item.BusyStatus -eq 3) { # Tentative, Busy or OutOfOffice
               $busySlots += [PSCustomObject]@{
                 Start = $item.Start
                 End = $item.End
